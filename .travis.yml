@@ -1,7 +1,6 @@
 cache: apt
 language:
   - cpp
-  - python
 compiler:
   - gcc
 notifications:
