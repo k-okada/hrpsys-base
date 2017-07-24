@@ -159,6 +159,7 @@ RTC::ReturnCode_t CollisionDetector::onInitialize()
     } else if ( prop["collision_library"] == "fcl_mesh" ) {
         m_collision_library = COLLISION_LIBRARY_FCL_MESH;
     }
+
 #ifdef USE_HRPSYSUTIL
     m_glbody = new GLbody();
     m_robot = hrp::BodyPtr(m_glbody);
@@ -193,62 +194,24 @@ RTC::ReturnCode_t CollisionDetector::onInitialize()
         convertToConvexHull(m_robot);
     }
     std::cerr << "[" << m_profile.instance_name << "] using " << m_collision_library << " collision detector" << std::endl;
-    switch (  m_collision_library ) {
-#ifdef USE_FCL
-        case COLLISION_LIBRARY_FCL_CONVEX:
-        case COLLISION_LIBRARY_FCL_MESH:
-            setupFCLModel(m_robot);
-            break;
-#endif // USE_FCL
-        case COLLISION_LIBRARY_VCLIP:
-        default:
-            setupVClipModel(m_robot);        
-            break;
+
+    if(prop["collision_left"] != "" && prop["collision_right"] != "") {
+        readCollisionList(prop["collision_left"], 0);
+        readCollisionList(prop["collision_right"], 1);
+
+        setupFCLModelByLists(m_robot, 0);
+        setupFCLModelByLists(m_robot, 1);
     }
 
-    if ( prop["collision_pair"] != "" ) {
-	std::cerr << "[" << m_profile.instance_name << "] prop[collision_pair] ->" << prop["collision_pair"] << std::endl;
-	std::istringstream iss(prop["collision_pair"]);
-	std::string tmp;
-	while (getline(iss, tmp, ' ')) {
-	    size_t pos = tmp.find_first_of(':');
-	    std::string name1 = tmp.substr(0, pos), name2 = tmp.substr(pos+1);
-            if ( m_robot->link(name1)==NULL ) {
-                std::cerr << "[" << m_profile.instance_name << "] Could not find robot link " << name1 << std::endl;
-		std::cerr << "[" << m_profile.instance_name << "] please choose one of following :";
-		for (unsigned int i=0; i < m_robot->numLinks(); i++) {
-		  std::cerr << " " << m_robot->link(i)->name;
-		}
-		std::cerr << std::endl;
-                continue;
-            }
-            if ( m_robot->link(name2)==NULL ) {
-                std::cerr << "[" << m_profile.instance_name << "] Could not find robot link " << name2 << std::endl;
-		std::cerr << "[" << m_profile.instance_name << "] please choose one of following :";
-		for (unsigned int i=0; i < m_robot->numLinks(); i++) {
-		  std::cerr << " " << m_robot->link(i)->name;
-		}
-		std::cerr << std::endl;
-                continue;
-            }
-            switch (  m_collision_library ) {
 #ifdef USE_FCL
-                case COLLISION_LIBRARY_FCL_CONVEX:
-                case COLLISION_LIBRARY_FCL_MESH:
-                    std::cerr << "[" << m_profile.instance_name << "] FCL: check collisions between " << m_robot->link(name1)->name << " and " <<  m_robot->link(name2)->name << std::endl;
-                    m_pair[tmp] = new CollisionLinkPair(new FCLLinkPair(m_robot->link(name1), m_FCLLinks[m_robot->link(name1)->index],
-                                                                        m_robot->link(name2), m_FCLLinks[m_robot->link(name2)->index], 0));
-                    break;
-#endif // USE_FCL
-                case COLLISION_LIBRARY_VCLIP:
-                    std::cerr << "[" << m_profile.instance_name << "] Vclip: check collisions between " << m_robot->link(name1)->name << " and " <<  m_robot->link(name2)->name << std::endl;
-                default:
-                    m_pair[tmp] = new CollisionLinkPair(new VclipLinkPair(m_robot->link(name1), m_VclipLinks[m_robot->link(name1)->index],
-                                                                          m_robot->link(name2), m_VclipLinks[m_robot->link(name2)->index], 0));
-                    break;
-            }
-	}
-    }
+    m_col_manager_l = new fcl::DynamicAABBTreeCollisionManager();
+    m_col_manager_l->registerObjects(m_objects[0]);
+    m_col_manager_l->setup();
+    m_col_manager_r = new fcl::DynamicAABBTreeCollisionManager();
+    m_col_manager_r->registerObjects(m_objects[1]);
+    m_col_manager_r->setup();
+    std::cerr << "[" << m_profile.instance_name << "] Finish collision manageer setup" << std::endl;
+#endif
 
     if ( prop["collision_loop"] != "" ) {
         coil::stringTo(m_collision_loop, prop["collision_loop"].c_str());
@@ -400,7 +363,7 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
         }
     }
     if (m_enable && m_qRefIn.isNew()) {
-	m_qRefIn.read();
+        m_qRefIn.read();
 
         // check servo for collision beep sound
         bool has_servoOn = false;
@@ -411,7 +374,7 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
 
         TimedPosture tp;
 
-	assert(m_qRef.data.length() == m_robot->numJoints());
+        assert(m_qRef.data.length() == m_robot->numJoints());
 #ifdef USE_HRPSYSUTIL
         if ( m_use_viewer ) {
           for (unsigned int i=0; i<m_glbody->numLinks(); i++){
@@ -431,83 +394,68 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
         //  1. current safe angle or collision angle  .. check based on qRef
         //  2. recovery                               .. check based on q'(m_recover_jointdata)
         if (m_recover_time == 0 || m_recover_time == default_recover_time ) {  // 1. current safe angle or collision angle
-            if ( m_loop_for_check == 0 ) { // update robot posutre for each m_loop_for_check timing
-                for ( unsigned int i = 0; i < m_robot->numJoints(); i++ ){
-                    m_robot->joint(i)->q = m_qRef.data[i];
-                }
+            // if ( m_loop_for_check == 0 ) { // update robot posutre for each m_loop_for_check timing
+            for ( unsigned int i = 0; i < m_robot->numJoints(); i++ ){
+                m_robot->joint(i)->q = m_qRef.data[i];
             }
+            // }
         }else{  // 2. recovery
           for ( unsigned int i = 0; i < m_robot->numJoints(); i++ ){
-            if ( m_loop_for_check == 0 ) { // update robot posutre for each m_loop_for_check timing
+            // if ( m_loop_for_check == 0 ) { // update robot posutre for each m_loop_for_check timing
               if ( m_curr_collision_mask[i] == 1) {// joint with 1 (do not move when collide :default), need to be updated using recover(safe) data
                   m_robot->joint(i)->q = m_recover_jointdata[i];
               }else{                               // joint with 0 (move even if collide), need to be updated using reference(dangerous) data
                   m_robot->joint(i)->q = m_qRef.data[i];
               }
-            }
+            // }
           }
         }
-        //        }
+        
         //collision check process in case of angle set above
-	m_robot->calcForwardKinematics();
-	coil::TimeValue tm1 = coil::gettimeofday();
-        std::map<std::string, CollisionLinkPair *>::iterator it = m_pair.begin();
-	for (int i = 0; it != m_pair.end(); it++, i++){
-            int sub_size = (m_pair.size() + m_collision_loop -1) / m_collision_loop;  // 10 / 3 = 3  / floor
-            // 0 : 0 .. sub_size-1                            // 0 .. 2
-            // 1 : sub_size ... sub_size*2-1                  // 3 .. 5
-            // k : sub_size*k ... sub_size*(k+1)-1            // 6 .. 8
-            // n : sub_size*n ... m_pair.size()               // 9 .. 10
-            if ( sub_size*m_loop_for_check <= i && i < sub_size*(m_loop_for_check+1) ) {
-                CollisionLinkPair* c = it->second;
-                c->distance = c->pair->computeDistance(c->point0.data(), c->point1.data());
-                //std::cerr << i << ":" << (c->distance<=c->pair->getTolerance() ) << "/" << c->distance << " ";
-            }
+        m_robot->calcForwardKinematics();
+        coil::TimeValue tm1 = coil::gettimeofday();
+    
+        bool last_safe_posture = m_safe_posture;
+        m_safe_posture = true;
+
+        // update pose of joints
+        updateJointPose(0);
+        updateJointPose(1);
+        m_col_manager_l->update();
+        m_col_manager_r->update();
+
+        // check callback
+        fcl::DynamicAABBTreeCollisionManager::DynamicAABBNode* root1 = m_col_manager_l->getTree().getRoot();
+        fcl::DynamicAABBTreeCollisionManager::DynamicAABBNode* root2 = m_col_manager_r->getTree().getRoot();
+        if(root1->isLeaf() && root2->isLeaf())
+        {
+          std::cerr << "[" << m_profile.instance_name << "] in isLeaf" << std::endl;
+          if(!root1->bv.overlap(root2->bv))
+            std::cerr << "[" << m_profile.instance_name << "] in bv.overlap 1" << std::endl;
         }
-        if ( m_loop_for_check == m_collision_loop-1 ) {
-            bool last_safe_posture = m_safe_posture;
-            m_safe_posture = true;
-            it = m_pair.begin();
-            for (unsigned int i = 0; it != m_pair.end(); i++, it++){
-                CollisionLinkPair* c = it->second;
-                boost::intrusive_ptr<CollisionLibraryLinkPair> p = c->pair;
-                tp.lines.push_back(std::make_pair(c->point0, c->point1));
-                if ( c->distance <= c->pair->getTolerance() ) {
-                    m_safe_posture = false;
-                    if ( loop%200==0 || last_safe_posture ) {
-                        hrp::JointPathPtr jointPath = m_robot->getJointPath(p->link(0),p->link(1));
-                        std::cerr << "[" << m_profile.instance_name << "] " << i << "/" << m_pair.size() << " pair: " << p->link(0)->name << "/" << p->link(1)->name << "(" << jointPath->numJoints() << "), distance = " << c->distance << std::endl;
-                    }
-                    m_link_collision[p->link(0)->index] = true;
-                    m_link_collision[p->link(1)->index] = true;
-                    if ( m_use_limb_collision ) {
-                        hrp::JointPathPtr jointPath = m_robot->getJointPath(p->link(0),p->link(1));
-                        bool stop_all = true;
-                        // if all joint is within false(0:move even if collide) in initial mask ( for example leg to leg ) we stop them
-                        // if some joint is not within true(1:do not move within collide) on initial mask, stop only true joint (for exmple leg to arm)
-                        for ( unsigned int i = 0; i < jointPath->numJoints(); i++ ){ if ( m_init_collision_mask[jointPath->joint(i)->jointId] == 1) stop_all = false; }
-                        for ( unsigned int i = 0; i < jointPath->numJoints(); i++ ){
-                            int id = jointPath->joint(i)->jointId;
-                            // collision_mask used to select output                0: passthough reference data, 1 output safe data
-                            if ( stop_all ) {
-                                m_curr_collision_mask[id] = 1;            // true (1: output safe data) do not move when collide,
-                            } else if (m_init_collision_mask[id] == 1) {  // skip false (0: move even if collide)
-                                m_curr_collision_mask[id] = 1;
-                            }
-                        }
-                    } else {
-                        std::copy(m_init_collision_mask.begin(), m_init_collision_mask.end(), m_curr_collision_mask.begin()); // copy init_collision_mask to curr_collision_mask
-                    }
-#ifdef USE_HRPSYSUTIL
-                    if ( m_use_viewer ) {
-                        ((GLlink *)p->link(0))->highlight(true);
-                        ((GLlink *)p->link(1))->highlight(true);
-                    }
-#endif // USE_HRPSYSUTIL
-                }
-            }
-            if ( m_safe_posture ) {
-                if (has_servoOn) {
+        
+        // Stop here
+        if(!root1->bv.overlap(root2->bv)) 
+            std::cerr << "[" << m_profile.instance_name << "] in bv.overlap 2" << std::endl;;
+          
+        if(root2->isLeaf() || (!root1->isLeaf() && (root1->bv.size() > root2->bv.size())))
+        {
+          std::cerr << "[" << m_profile.instance_name << "] in size" << std::endl;
+        }
+
+        // check collision
+        m_col_manager_l->collide(m_col_manager_r, &m_collision_data, hrpsysCollisionFunction);
+        std::cerr << "[" << m_profile.instance_name << "] collision objects: " << m_col_manager_l->size() << std::endl;
+        // if collision occurs
+        if(m_collision_data.result.isCollision()) {
+            m_safe_posture = false;
+            std::copy(m_init_collision_mask.begin(), m_init_collision_mask.end(), m_curr_collision_mask.begin()); // copy init_collision_mask to curr_collision_mask
+            std::cerr << "[" << m_profile.instance_name << "] collision detected" << std::endl;
+        }
+        m_collision_data.result.clear();
+
+        if ( m_safe_posture ) {
+            if (has_servoOn) {
                 if (! m_have_safe_posture ) {
                     // first transition collision -> safe
                     std::cerr << "[" << m_profile.instance_name << "] [" << m_qRef.tm
@@ -518,31 +466,31 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
                     m_interpolator->set(m_lastsafe_jointdata); // Set current angles as initial angle for recover
                 }
                 m_have_safe_posture = true;
-                }
-                if (m_recover_time != default_recover_time) {
-                    // sefe or recover
-                    // in collision, robot->q may differ from m_q.
-                    for ( unsigned int i = 0; i < m_q.data.length(); i++ ) {
-                        m_lastsafe_jointdata[i] = m_robot->joint(i)->q;
-                    }
-                }
-            }else{
+            }
+            if (m_recover_time != default_recover_time) {
+                // sefe or recover
+                // in collision, robot->q may differ from m_q.
                 for ( unsigned int i = 0; i < m_q.data.length(); i++ ) {
-                    if ( m_curr_collision_mask[i] == 0 ) { // if collisoin_mask is 0 (move even if collide), we update lastsafe_joint_data from input data
-                        m_lastsafe_jointdata[i] = m_robot->joint(i)->q;
-                    }
+                    m_lastsafe_jointdata[i] = m_robot->joint(i)->q;
                 }
             }
-            if ( m_use_limb_collision ) {
-               if ( loop%200==0 and ! m_safe_posture ) {
-                   std::cerr << "[" << m_profile.instance_name << "] collision_mask : ";
-                    for (size_t i = 0; i < m_robot->numJoints(); i++) {
-                        std::cerr << m_robot->joint(i)->name << ":"  << m_curr_collision_mask[i] << " ";
-                    }
-                    std::cerr << std::endl;
+        }else{
+            for ( unsigned int i = 0; i < m_q.data.length(); i++ ) {
+                if ( m_curr_collision_mask[i] == 0 ) { // if collisoin_mask is 0 (move even if collide), we update lastsafe_joint_data from input data
+                    m_lastsafe_jointdata[i] = m_robot->joint(i)->q;
                 }
             }
         }
+        if ( m_use_limb_collision ) {
+           if ( loop%200==0 and ! m_safe_posture ) {
+               std::cerr << "[" << m_profile.instance_name << "] collision_mask : ";
+                for (size_t i = 0; i < m_robot->numJoints(); i++) {
+                    std::cerr << m_robot->joint(i)->name << ":"  << m_curr_collision_mask[i] << " ";
+                }
+                std::cerr << std::endl;
+            }
+        }
+        // }
         //     mode : m_safe_posture : recover_time  : set as q
         // safe     :           true :            0  : qRef
         // collison :          false :         >  0  : q( do nothing)
@@ -557,17 +505,12 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
           // collision_mask used to select output                0: passthough reference data, 1 output safe data
           std::fill(m_curr_collision_mask.begin(), m_curr_collision_mask.end(), 0); // false(0) clear output data
         } else {
-          static int collision_loop_recover = 0;
           if(m_safe_posture){  //recover
             //std::cerr << "recover-------------- " << std::endl;
             for ( unsigned int i = 0; i < m_q.data.length(); i++ ) {
               m_q.data[i] = m_recover_jointdata[i];
             }
             m_recover_time = m_recover_time - i_dt;
-          } else if (m_collision_loop > 1 && (m_recover_time != default_recover_time)) { // collision with collision_loop
-            //std::cerr << "collision_loop-------------- " << std::endl;
-            collision_loop_recover = m_collision_loop;
-            m_recover_time = default_recover_time;      // m_recover_time should be set based on difference between qRef and q
           } else { //collision
             //std::cerr << "collision-------------- " << std::endl;
             //do nothing (stay previous m_q)
@@ -587,25 +530,16 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
             m_recover_jointdata[i] = m_q.data[i] + (m_qRef.data[i] - m_q.data[i]) / m_recover_time;
           }
 #else
-          if (collision_loop_recover != 0) {
-            collision_loop_recover--;
-            for ( unsigned int i = 0; i < m_q.data.length(); i++ ) {
-              m_q.data[i] =
-                  m_lastsafe_jointdata[i] + collision_loop_recover * ((m_q.data[i] - m_lastsafe_jointdata[i])/m_collision_loop);
-            }
-          } else {
-          collision_loop_recover = 0;
           //minjerk interpolation
           m_interpolator->setGoal(m_qRef.data.get_buffer(), m_recover_time);
           m_interpolator->get(m_recover_jointdata);
-          }
 #endif
         }
         if ( DEBUGP ) {
-          std::cerr << "[" << m_profile.instance_name << "] check collisions for " << m_pair.size() << " pairs in " << (tm2.sec()-tm1.sec())*1000+(tm2.usec()-tm1.usec())/1000.0 
+          std::cerr << "[" << m_profile.instance_name << "] check collisions for " << m_objects[0].size() << " pairs in " << (tm2.sec()-tm1.sec())*1000+(tm2.usec()-tm1.usec())/1000.0 
                     << " [msec], safe = " << m_safe_posture << ", time = " << m_recover_time*m_dt << "[s], loop = " << m_loop_for_check << "/" << m_collision_loop << std::endl;
         }
-        if ( m_pair.size() == 0 && ( DEBUGP || (loop % ((int)(5/m_dt))) == 1) ) {
+        if ( (m_objects[0].size() == 0 || m_objects[1].size() == 0) && ( DEBUGP || (loop % ((int)(5/m_dt))) == 1) ) {
             std::cerr << "[" << m_profile.instance_name << "] CAUTION!! The robot is moving without checking self collision detection!!! please define collision_pair in configuration file" << std::endl;
         }
         if ( ! m_have_safe_posture && ! m_safe_posture ) {
@@ -639,7 +573,7 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
           collision_beep_count = 0;
         }
 
-        if ( ++m_loop_for_check >= m_collision_loop ) m_loop_for_check = 0;
+        // if ( ++m_loop_for_check >= m_collision_loop ) m_loop_for_check = 0;
         tp.posture.resize(m_qRef.data.length());
         for (size_t i=0; i<tp.posture.size(); i++) tp.posture[i] = m_q.data[i];
 #ifdef USE_HRPSYSUTIL
@@ -652,32 +586,26 @@ RTC::ReturnCode_t CollisionDetector::onExecute(RTC::UniqueId ec_id)
             m_state.angle[i] = m_robot->joint(i)->q;
         }
 
-        if ( m_loop_for_check == 0 ) {
-            for (unsigned int i = 0; i < m_robot->numLinks(); i++ ){
-                m_state.collide[i] = m_link_collision[i];
-            }
-
-            m_state.lines.length(tp.lines.size());
-            for(unsigned int i = 0; i < tp.lines.size(); i++ ){
-                const std::pair<hrp::Vector3, hrp::Vector3>& line = tp.lines[i];
-                double *v;
-                m_state.lines[i].length(2);
-                m_state.lines[i].get_buffer()[0].length(3);
-                v = m_state.lines[i].get_buffer()[0].get_buffer();
-                v[0] = line.first.data()[0];
-                v[1] = line.first.data()[1];
-                v[2] = line.first.data()[2];
-                m_state.lines[i].get_buffer()[1].length(3);
-                v = m_state.lines[i].get_buffer()[1].get_buffer();
-                v[0] = line.second.data()[0];
-                v[1] = line.second.data()[1];
-                v[2] = line.second.data()[2];
-            }
+        m_state.lines.length(tp.lines.size());
+        for(unsigned int i = 0; i < tp.lines.size(); i++ ){
+            const std::pair<hrp::Vector3, hrp::Vector3>& line = tp.lines[i];
+            double *v;
+            m_state.lines[i].length(2);
+            m_state.lines[i].get_buffer()[0].length(3);
+            v = m_state.lines[i].get_buffer()[0].get_buffer();
+            v[0] = line.first.data()[0];
+            v[1] = line.first.data()[1];
+            v[2] = line.first.data()[2];
+            m_state.lines[i].get_buffer()[1].length(3);
+            v = m_state.lines[i].get_buffer()[1].get_buffer();
+            v[0] = line.second.data()[0];
+            v[1] = line.second.data()[1];
+            v[2] = line.second.data()[2];
         }
-         m_state.computation_time = (tm2-tm1)*1000.0;
+        m_state.computation_time = (tm2-tm1)*1000.0;
         m_state.safe_posture = m_safe_posture;
         m_state.recover_time = m_recover_time;
-        m_state.loop_for_check = m_loop_for_check;
+        m_state.loop_for_check = 0;
     }
     if (is_beep_port_connected) {
       bc.setDataPort(m_beepCommand);
@@ -773,6 +701,18 @@ void CollisionDetector::setupFCLModel(hrp::BodyPtr i_body)
 }
 #endif // USE_FCL
 
+#ifdef USE_FCL
+void CollisionDetector::setupFCLModelByLists(hrp::BodyPtr i_body, int id)
+{
+    m_FCLLinks.resize(i_body->numLinks());
+    //std::cerr << i_body->numLinks() << std::endl;
+    for (unsigned int i=0; i<i_body->numLinks(); i++) {
+        assert(i_body->link(i)->index == i);
+        setupFCLModelByLists(i_body->link(i), id, i);
+    }
+}
+#endif // USE_FCL
+
 bool CollisionDetector::checkIsSafeTransition(void)
 {
     for ( unsigned int i = 0; i < m_q.data.length(); i++ ) {
@@ -800,18 +740,19 @@ bool CollisionDetector::enable(void)
         m_robot->joint(i)->q = m_qRef.data[i];
     }
     m_robot->calcForwardKinematics();
-    std::map<std::string, CollisionLinkPair *>::iterator it = m_pair.begin();
-    for (unsigned int i = 0; it != m_pair.end(); it++, i++){
-        CollisionLinkPair* c = it->second;
-        boost::intrusive_ptr<CollisionLibraryLinkPair> p = c->pair;
-        c->distance = c->pair->computeDistance(c->point0.data(), c->point1.data());
-        if ( c->distance <= c->pair->getTolerance() ) {
-            hrp::JointPathPtr jointPath = m_robot->getJointPath(p->link(0),p->link(1));
-            std::cerr << "[" << m_profile.instance_name << "] CollisionDetector cannot be enabled because of collision" << std::endl;
-            std::cerr << "[" << m_profile.instance_name << "] " << i << "/" << m_pair.size() << " pair: " << p->link(0)->name << "/" << p->link(1)->name << "(" << jointPath->numJoints() << "), distance = " << c->distance << std::endl;
-            return false;
-        }
+    // update pose of joints
+    updateJointPose(0);
+    updateJointPose(1);
+    m_col_manager_l->update();
+    m_col_manager_r->update();
+    // check collision
+    m_col_manager_l->collide(m_col_manager_r, &m_collision_data, hrpsysCollisionFunction);
+    // if collision occurs
+    if(m_collision_data.result.isCollision()) {
+        return false;
     }
+    m_collision_data.result.clear();
+    
     std::cerr << "[" << m_profile.instance_name << "] CollisionDetector is successfully enabled." << std::endl;
 
     m_safe_posture = true;
@@ -989,6 +930,193 @@ void CollisionDetector::setupFCLModel(hrp::Link *i_link)
     m_FCLLinks[i_link->index] = fcl_model;
 }
 #endif // USE_FCL
+
+#ifdef USE_FCL
+void CollisionDetector::setupFCLModelByLists(hrp::Link *i_link, int id, unsigned int index)
+{
+    std::vector<fcl::Vec3f> fcl_vertices;
+    std::vector<fcl::Triangle> fcl_triangles;
+
+#define USE_QHULL 1
+#if USE_QHULL
+    std::vector<coordT> points;
+    for (int i = 0; i < i_link->coldetModel->getNumVertices(); i++ ) {
+        float v1, v2, v3;
+        i_link->coldetModel->getVertex(i, v1, v2, v3);
+        points.push_back(v1);
+        points.push_back(v2);
+        points.push_back(v3);
+    }
+
+    char qhull_attr[] = "qhull Qt Tc C-0.001";
+    //char qhull_attr[] = "qhull Qt Tc";
+    int ret = qh_new_qhull (3, points.size()/3, &points[0], 0, qhull_attr, NULL, stderr);
+    if (ret == 0) {
+        qh_triangulate();
+        //qh_vertexneighbors();
+        //fprintf(stderr, "[FCL] face %d -> %d / vert %d -> %d\n",
+        //points.size()/9, qh num_facets,
+        //points.size()/3, qh num_vertices);
+
+        int vertexIndex = 0;
+        int numVertices = qh num_vertices;
+        int numTriangles = qh num_facets;
+        int index[points.size()/3];
+        {
+            vertexT *vertex, **vertexp;
+            FORALLvertices {
+                int p = qh_pointid(vertex->point);
+                index[p] = vertexIndex;
+                vertexIndex++;
+                fcl::Vec3f v(points[p*3+0], points[p*3+1], points[p*3+2]);
+                fcl_vertices.push_back(v);
+            }
+        }
+        {
+            facetT *facet;
+            vertexT *vertex, **vertexp;
+            FORALLfacets {
+                int j = 0, p[3];
+                setT *vertices = qh_facet3vertex (facet);
+                FOREACHvertex_(vertices) {
+                    if(j < 3) {
+                        p[j] = index[qh_pointid(vertex->point)];
+                    } else {
+                        fprintf(stderr, "extra vertex %d\n",j);
+                    }
+                    j++;
+                }
+                qh_settempfree(&vertices);
+                fcl::Triangle tri(p[0], p[1], p[2]);
+                fcl_triangles.push_back(tri);
+            }
+        }
+        qh_freeqhull(!qh_ALL);
+        int curlong, totlong;    // memory remaining after qh_memfreeshort
+        qh_memfreeshort (&curlong, &totlong);    // free short memory and memory allocator
+        fprintf(stderr, "[FCL] build finished, qhull mesh of %s, %d -> %d (%d)\n",
+                i_link->name.c_str(), (int)(points.size())/3, (int)(fcl_triangles.size()), numTriangles);
+    } else {
+        fprintf(stderr, "[FCL] can not build qhull mesh of %s\n", i_link->name.c_str());
+    }
+#else
+    for (int i = 0; i < i_link->coldetModel->getNumVertices(); i ++ ) {
+        float v1, v2, v3;
+        i_link->coldetModel->getVertex(i, v1, v2, v3);
+        fcl::Vec3f p(v1, v2, v3);
+        fcl_vertices.push_back(p);
+    }
+    for (int i = 0; i < i_link->coldetModel->getNumTriangles(); i ++ ) {
+        int i1, i2, i3;
+        i_link->coldetModel->getTriangle(i, i1, i2, i3);
+        fcl::Triangle tri(i1, i2, i3);
+        fcl_triangles.push_back(tri);
+    }
+#endif
+    FCLModel *fcl_model;
+    switch (  m_collision_library ) {
+      case COLLISION_LIBRARY_FCL_CONVEX:
+        {
+#ifdef USE_FCL_MESH
+        std::cerr << "COLLISION_LIBRARY_FCL_CONVEX is not supported" << std::endl;
+#else
+        // https://groups.google.com/forum/#!topic/moveit-users/PgnyOPup_Zs
+        int num_planes = fcl_triangles.size();
+        int num_points = fcl_vertices.size();
+        fcl::Vec3f* normals = new fcl::Vec3f[num_planes];
+        fcl::FCL_REAL* distances = new fcl::FCL_REAL[num_planes];
+        fcl::Vec3f* vertices = new fcl::Vec3f[num_points];
+        int* indices = new int[num_planes*4];
+        for (int i = 0; i < fcl_vertices.size(); i ++ ) {
+            vertices[i].setValue(fcl_vertices[i][0],fcl_vertices[i][1],fcl_vertices[i][2]);
+        }
+        for (int i = 0; i < num_planes; i ++ ) {
+            // copy from lib/util/GLlink.cpp
+            int i0 = fcl_triangles[i][0], i1 = fcl_triangles[i][1], i2 = fcl_triangles[i][2];
+            fcl::Vec3f p0 = fcl_vertices[i0], p1 = fcl_vertices[i1], p2 = fcl_vertices[i2];
+            fcl::Vec3f n = ((p1 - p0).cross(p2 - p0)).normalize();
+            normals[i].setValue(n[0],n[1],n[2]);
+            distances[i] = normals[i].dot(p0); // distance
+            indices[i*4+0] = 3; // number of points for next triangle
+            indices[i*4+1] = i0;
+            indices[i*4+2] = i1;
+            indices[i*4+3] = i2;
+        }
+        std::cerr << "[FCL] build FCLModel of " << i_link->name << " with COLLISION_LIBRARY_FCL_CONVEX" << std::endl;
+        fcl_model = new FCLModel(new ConvexFixed (normals,
+                                                  distances,
+                                                  num_planes,
+                                                  vertices,
+                                                  num_points,
+                                                  indices));
+#endif
+        }
+        break;
+      case COLLISION_LIBRARY_FCL_MESH:
+#ifdef USE_FCL_MESH
+        std::cerr << "[FCL] build FCLModel of " << i_link->name << " with COLLISION_LIBRARY_FCL_MESH" << std::endl;
+        fcl_model = new FCLModel();
+        fcl_model->bv_splitter.reset(new fcl::BVSplitter<FCLCollisionModel>(fcl::SPLIT_METHOD_BV_CENTER));
+
+        fcl_model->beginModel();
+        fcl_model->addSubModel(fcl_vertices, fcl_triangles);
+        fcl_model->endModel();
+#else
+        std::cerr << "COLLISION_LIBRARY_FCL_MESH is not supported" << std::endl;
+#endif
+        break;
+    }
+
+    // setting up fcl collision object
+    std::vector<std::string> v = m_link_names[id];
+    if(std::find(v.begin(), v.end(), i_link->name) != v.end()) {
+        m_link_index[id].push_back(index);
+        const hrp::Vector3& p1 = i_link->p;
+        hrp::Matrix33 r1 = i_link->attitude();
+        fcl::Vec3f fT(p1(0), p1(1), p1(2));
+        fcl::Matrix3f fR(r1(0, 0), r1(0, 1), r1(0, 2),
+                          r1(1, 0), r1(1, 1), r1(1, 2),
+                          r1(2, 0), r1(2, 1), r1(2, 2));
+        fcl::Transform3f pose(fR, fT);
+        m_objects[id].push_back(new fcl::CollisionObject(*fcl_model, pose));
+        std::cerr << "[" << m_profile.instance_name << "] Add model with index: " << index << std::endl;
+    }
+}
+#endif // USE_FCL
+
+void CollisionDetector::readCollisionList(std::string& input, int id) {
+    std::istringstream iss(input);
+    std::string link_name;
+    while(getline(iss, link_name, ' ')) {
+        if(m_robot->link(link_name) == NULL) {
+            std::cerr << "[" << m_profile.instance_name << "] Could not find robot link " << link_name << std::endl;
+            std::cerr << "[" << m_profile.instance_name << "] please choose one of following :";
+            for (unsigned int i=0; i < m_robot->numLinks(); i++) {
+                std::cerr << " " << m_robot->link(i)->name;
+            }
+            std::cerr << std::endl;
+            continue;
+        }
+        std::cerr << "[" << m_profile.instance_name << "] check collisions: " << m_robot->link(link_name)->name << std::endl;
+        m_link_names[id].push_back(link_name);
+    }
+}
+
+void CollisionDetector::updateJointPose(int id) {
+    std::vector<unsigned int>::iterator it;
+    
+    int i = 0;
+    for(it = m_link_index[id].begin(); it != m_link_index[id].end(); it++, i++) {
+        const hrp::Vector3&  p1 = m_robot->link(*it)->p;
+        hrp::Matrix33 r1 = m_robot->link(*it)->attitude();
+        fcl::Vec3f fT(p1(0), p1(1), p1(2));
+        fcl::Matrix3f fR(r1(0, 0), r1(0, 1), r1(0, 2),
+                      r1(1, 0), r1(1, 1), r1(1, 2),
+                      r1(2, 0), r1(2, 1), r1(2, 2));
+        fcl::Transform3f pose(fR, fT);
+        m_objects[id][i]->setTransform(pose);
+    }
+}
 
 #ifndef USE_HRPSYSUTIL
 hrp::Link *hrplinkFactory()

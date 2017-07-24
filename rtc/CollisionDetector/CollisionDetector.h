@@ -10,6 +10,7 @@
 #ifndef COLLISION_DETECTOR_H
 #define COLLISION_DETECTOR_H
 
+#include <algorithm>
 #include <rtm/idl/BasicDataType.hh>
 #include "hrpsys/idl/HRPDataTypes.hh"
 #include <rtm/Manager.h>
@@ -33,6 +34,11 @@
 #include "FCLLinkPair.h"
 #include "CollisionDetectorService_impl.h"
 #include "../SoftErrorLimiter/beep.h"
+
+#include "FCLCollision.h"
+#include "fcl/broadphase/broadphase.h"
+#include "fcl/broadphase/broadphase_dynamic_AABB_tree.h"
+#include "fcl/math/transform.h"
 
 // Service implementation headers
 // <rtc-template block="service_impl_h">
@@ -169,6 +175,10 @@ class CollisionDetector
   // FCL
   void setupFCLModel(hrp::BodyPtr i_body);
   void setupFCLModel(hrp::Link *i_link);
+  void setupFCLModelByLists(hrp::BodyPtr i_body, int id);
+  void setupFCLModelByLists(hrp::Link *i_link, int id, unsigned int index);
+  void updateJointPose(int id);
+  void readCollisionList(std::string& input, int id);
 #endif // USE_FCL
 
  private:
@@ -193,9 +203,19 @@ class CollisionDetector
   GLbody *m_glbody;
 #endif // USE_HRPSYSUTIL
   std::vector<Vclip::Polyhedron *> m_VclipLinks;
+
 #ifdef USE_FCL
   std::vector<FCLModel *> m_FCLLinks;
+  // fcl::BroadPhaseCollisionManager* m_col_manager_l;
+  // fcl::BroadPhaseCollisionManager* m_col_manager_r;
+  fcl::DynamicAABBTreeCollisionManager* m_col_manager_l;
+  fcl::DynamicAABBTreeCollisionManager* m_col_manager_r;
+  std::vector<fcl::CollisionObject*> m_objects[2];
+  std::vector<std::string> m_link_names[2];
+  CollisionData m_collision_data;
+  std::vector<unsigned int> m_link_index[2];
 #endif // USE_FCL
+
   std::vector<int> m_curr_collision_mask, m_init_collision_mask;
   bool m_use_limb_collision;
   bool m_use_viewer;
